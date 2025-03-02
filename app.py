@@ -1,156 +1,147 @@
-from flask import Flask, render_template_string, request, redirect, flash, url_for
-from instagrapi import Client
+import os
 import time
+from flask import Flask, request, redirect, url_for, flash, render_template_string
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 app = Flask(__name__)
+app.config["UPLOAD_FOLDER"] = "uploads"
 app.secret_key = "your_secret_key"
 
-# HTML Template
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Instagram Group Name Manager</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f4f4;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-        }
-        .container {
-            background-color: #ffffff;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-            max-width: 400px;
-            width: 100%;
-        }
-        h1 {
-            text-align: center;
-            color: #333;
-        }
-        label {
-            display: block;
-            font-weight: bold;
-            margin: 10px 0 5px;
-        }
-        input, select, button {
-            width: 100%;
-            padding: 10px;
-            margin-bottom: 15px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-        }
-        button {
-            background-color: #007BFF;
-            color: white;
-            border: none;
-            cursor: pointer;
-        }
-        button:hover {
-            background-color: #0056b3;
-        }
-        .message {
-            color: red;
-            font-size: 14px;
-            text-align: center;
-        }
-        .success {
-            color: green;
-            font-size: 14px;
-            text-align: center;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Group Name Manager</h1>
-        <form action="/" method="POST">
-            <label for="username">Instagram Username:</label>
-            <input type="text" id="username" name="username" placeholder="Enter your username" required>
+# Ensure upload folder exists
+if not os.path.exists(app.config["UPLOAD_FOLDER"]):
+    os.makedirs(app.config["UPLOAD_FOLDER"])
 
-            <label for="password">Instagram Password:</label>
-            <input type="password" id="password" name="password" placeholder="Enter your password" required>
 
-            <label for="thread_id">Group Thread ID:</label>
-            <input type="text" id="thread_id" name="thread_id" placeholder="Enter group thread ID" required>
+def instagram_login(username, password):
+    """Logs into Instagram using Selenium"""
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")  # Run without opening a browser
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-            <label for="group_name">New Group Name:</label>
-            <input type="text" id="group_name" name="group_name" placeholder="Enter new group name" required>
+    driver.get("https://www.instagram.com/accounts/login/")
+    time.sleep(5)
 
-            <label for="lock_group">Lock Group Name:</label>
-            <select id="lock_group" name="lock_group" required>
-                <option value="no">No</option>
-                <option value="yes">Yes</option>
-            </select>
+    try:
+        user_input = driver.find_element(By.NAME, "username")
+        pass_input = driver.find_element(By.NAME, "password")
+        login_button = driver.find_element(By.XPATH, "//button[@type='submit']")
 
-            <button type="submit">Apply Changes</button>
-        </form>
-        {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-        <div>
-            {% for category, message in messages %}
-            <p class="{{ category }}">{{ message }}</p>
-            {% endfor %}
-        </div>
-        {% endif %}
-        {% endwith %}
-    </div>
-</body>
-</html>
-'''
+        user_input.send_keys(username)
+        pass_input.send_keys(password)
+        login_button.click()
+        time.sleep(5)
 
-# Lock status dictionary to store locked group names
-lock_status = {}
+        if "challenge" in driver.current_url:
+            flash("Instagram login requires verification. Please log in manually first.", "danger")
+            driver.quit()
+            return None
+
+        return driver
+    except Exception as e:
+        flash(f"Login error: {e}", "danger")
+        driver.quit()
+        return None
+
+
+def send_message(driver, thread_id, message, delay):
+    """Sends a message to a specific Instagram thread"""
+    try:
+        driver.get(f"https://www.instagram.com/direct/t/{thread_id}/")
+        time.sleep(5)
+
+        message_box = driver.find_element(By.XPATH, "//textarea[contains(@placeholder, 'Message...')]")
+        message_box.send_keys(message)
+        time.sleep(delay)
+        message_box.send_keys(Keys.RETURN)
+        flash("Message sent successfully!", "success")
+    except Exception as e:
+        flash(f"Error sending message: {e}", "danger")
+    finally:
+        driver.quit()
+
 
 @app.route("/", methods=["GET", "POST"])
-def manage_group_name():
+def index():
     if request.method == "POST":
-        try:
-            # Get form data
-            username = request.form["username"]
-            password = request.form["password"]
-            thread_id = request.form["thread_id"]
-            group_name = request.form["group_name"]
-            lock_group = request.form["lock_group"]
+        username = request.form["username"]
+        password = request.form["password"]
+        thread_id = request.form["thread_id"]
+        delay = int(request.form["delay"])
 
-            # Check if the group is locked
-            if lock_status.get(thread_id, {}).get("locked", False):
-                flash("This group name is locked and cannot be changed.", "message")
-                return redirect(url_for("manage_group_name"))
+        uploaded_file = request.files["file"]
+        if uploaded_file.filename == "":
+            flash("No file selected!", "danger")
+            return redirect(url_for("index"))
 
-            # Login to Instagram
-            client = Client()
-            client.login(username, password)
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], uploaded_file.filename)
+        uploaded_file.save(file_path)
 
-            # Change group name
-            client.direct_thread_name(thread_id, group_name)
-            flash(f"Group name successfully changed to '{group_name}'", "success")
+        with open(file_path, "r", encoding="utf-8") as f:
+            message = f.read().strip()
 
-            # Handle locking
-            if lock_group == "yes":
-                lock_status[thread_id] = {"locked": True, "name": group_name}
-                flash("Group name has been locked.", "success")
-            else:
-                lock_status.pop(thread_id, None)
+        driver = instagram_login(username, password)
+        if driver:
+            send_message(driver, thread_id, message, delay)
 
-            return redirect(url_for("manage_group_name"))
+        return redirect(url_for("index"))
 
-        except Exception as e:
-            flash(f"Error: {str(e)}", "message")
-            return redirect(url_for("manage_group_name"))
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Instagram Auto Messenger</title>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    </head>
+    <body>
+        <div class="container mt-5">
+            <h2 class="text-center">Instagram Auto Messenger</h2>
 
-    # Render the form
-    return render_template_string(HTML_TEMPLATE)
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="mt-3">
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }}">{{ message }}</div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+
+            <form action="/" method="POST" enctype="multipart/form-data">
+                <div class="mb-3">
+                    <label class="form-label">Instagram Username</label>
+                    <input type="text" name="username" class="form-control" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Instagram Password</label>
+                    <input type="password" name="password" class="form-control" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Target Thread ID</label>
+                    <input type="text" name="thread_id" class="form-control" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Message File (TXT)</label>
+                    <input type="file" name="file" class="form-control" accept=".txt" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Delay (seconds)</label>
+                    <input type="number" name="delay" class="form-control" min="1" value="3" required>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">Send Message</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """)
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
-
-        
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, host="0.0.0.0", port=port)
+    
